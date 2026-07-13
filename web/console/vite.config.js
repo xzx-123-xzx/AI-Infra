@@ -16,6 +16,16 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/rag/, ''),
       },
+      '/api/mlops': {
+        target: 'http://localhost:8084',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/mlops/, ''),
+      },
+      '/api/agent': {
+        target: 'http://localhost:8083',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/agent/, ''),
+      },
     },
   },
 })

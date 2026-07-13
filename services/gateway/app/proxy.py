@@ -8,15 +8,15 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.models import ApiKey, UsageLog
-from common.config import conf
 from common.logger import my_logger
-
-
-def _chat_completions_url() -> str:
-    base = conf.MODEL_BASE_URL.rstrip("/")
-    if base.endswith("/v1"):
-        return f"{base}/chat/completions"
-    return f"{base}/v1/chat/completions"
+from common.model_router import (
+    RouteDecision,
+    UpstreamTarget,
+    chat_completions_url,
+    get_fallback_target,
+    route_request,
+)
+from common.tracing import log_generation, trace_span
 
 
 async def proxy_chat_completions(
@@ -25,72 +25,132 @@ async def proxy_chat_completions(
     api_key: ApiKey,
     db: Session,
 ) -> Any:
-    url = _chat_completions_url()
-    headers = {
-        "Authorization": f"Bearer {conf.MODEL_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    decision = route_request(body, tenant_id=api_key.tenant_id)
+    body = {**body, "model": decision.model}
     stream = bool(body.get("stream", False))
-    model = str(body.get("model", conf.MODEL_NAME or "unknown"))
     started = time.perf_counter()
-    my_logger.info("Proxy chat: tenant=%s model=%s stream=%s", api_key.tenant_id, model, stream)
+    my_logger.info(
+        "Proxy chat: tenant=%s model=%s provider=%s reason=%s stream=%s",
+        api_key.tenant_id,
+        decision.model,
+        decision.target.provider,
+        decision.reason,
+        stream,
+    )
 
     async with httpx.AsyncClient(timeout=120.0) as client:
-        if stream:
-            return await _stream_response(client, url, headers, body, api_key, db, model, started)
-        return await _json_response(client, url, headers, body, api_key, db, model, started)
+        with trace_span(
+            "gateway-chat",
+            user_id=api_key.tenant_id,
+            session_id=str(api_key.id),
+            input_data={"model": body.get("model"), "tenant": api_key.tenant_id},
+            tags=["gateway"],
+        ) as trace:
+            try:
+                if stream:
+                    return await _stream_response(client, body, api_key, db, decision, started, trace)
+                return await _json_response(client, body, api_key, db, decision, started, trace)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code < 500:
+                    raise
+                return await _try_fallback(client, body, api_key, db, decision, started, stream, exc, trace)
+            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                return await _try_fallback(client, body, api_key, db, decision, started, stream, exc, trace)
+
+
+async def _try_fallback(
+    client: httpx.AsyncClient,
+    body: dict[str, Any],
+    api_key: ApiKey,
+    db: Session,
+    decision: RouteDecision,
+    started: float,
+    stream: bool,
+    original_exc: Exception,
+    trace: Any = None,
+) -> Any:
+    fallback = get_fallback_target()
+    if fallback is None or fallback.model == decision.model:
+        raise original_exc
+
+    my_logger.warning("Fallback: %s -> %s", decision.model, fallback.model)
+    fb_decision = RouteDecision(model=fallback.model, target=fallback, reason="fallback")
+    body = {**body, "model": fallback.model}
+    if stream:
+        return await _stream_response(client, body, api_key, db, fb_decision, started, trace)
+    return await _json_response(client, body, api_key, db, fb_decision, started, trace)
+
+
+def _headers(target: UpstreamTarget) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {target.api_key}",
+        "Content-Type": "application/json",
+    }
 
 
 async def _json_response(
     client: httpx.AsyncClient,
-    url: str,
-    headers: dict[str, str],
     body: dict[str, Any],
     api_key: ApiKey,
     db: Session,
-    model: str,
+    decision: RouteDecision,
     started: float,
+    trace: Any = None,
 ) -> dict[str, Any]:
+    url = chat_completions_url(decision.target)
     try:
-        resp = await client.post(url, headers=headers, json=body)
+        resp = await client.post(url, headers=_headers(decision.target), json=body)
         latency_ms = int((time.perf_counter() - started) * 1000)
         payload = resp.json()
         usage = payload.get("usage") or {}
         _log_usage(
             db,
             api_key,
-            model,
+            decision.model,
             usage.get("prompt_tokens", 0),
             usage.get("completion_tokens", 0),
             latency_ms,
             "success" if resp.is_success else "error",
             None if resp.is_success else resp.text[:500],
+            decision.reason,
         )
         resp.raise_for_status()
-        my_logger.info("Chat success: model=%s latency=%sms", model, latency_ms)
+        payload.setdefault("x_route_reason", decision.reason)
+        payload.setdefault("x_provider", decision.target.provider)
+        log_generation(
+            trace,
+            name="chat",
+            model=decision.model,
+            input_data=body.get("messages"),
+            output_data=payload.get("choices"),
+            usage=usage,
+            metadata={"provider": decision.target.provider, "reason": decision.reason},
+        )
+        my_logger.info("Chat success: model=%s provider=%s latency=%sms", decision.model, decision.target.provider, latency_ms)
         return payload
-    except httpx.HTTPStatusError as exc:
+    except httpx.HTTPStatusError:
         latency_ms = int((time.perf_counter() - started) * 1000)
-        _log_usage(db, api_key, model, 0, 0, latency_ms, "error", str(exc)[:500])
-        my_logger.error("Upstream HTTP error: model=%s status=%s", model, exc.response.status_code)
+        _log_usage(db, api_key, decision.model, 0, 0, latency_ms, "error", "upstream_http_error", decision.reason)
         raise
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
-        _log_usage(db, api_key, model, 0, 0, latency_ms, "error", str(exc)[:500])
-        my_logger.exception("Chat proxy failed: model=%s", model)
+        _log_usage(db, api_key, decision.model, 0, 0, latency_ms, "error", str(exc)[:500], decision.reason)
+        my_logger.exception("Chat proxy failed: model=%s", decision.model)
         raise
 
 
 async def _stream_response(
     client: httpx.AsyncClient,
-    url: str,
-    headers: dict[str, str],
     body: dict[str, Any],
     api_key: ApiKey,
     db: Session,
-    model: str,
+    decision: RouteDecision,
     started: float,
+    trace: Any = None,
 ) -> StreamingResponse:
+    url = chat_completions_url(decision.target)
+    headers = _headers(decision.target)
+
     async def event_generator():
         prompt_tokens = 0
         completion_tokens = 0
@@ -101,7 +161,7 @@ async def _stream_response(
                 if resp.is_error:
                     status = "error"
                     error_message = (await resp.aread()).decode()[:500]
-                    my_logger.error("Stream upstream error: model=%s", model)
+                    my_logger.error("Stream upstream error: model=%s", decision.model)
                     yield error_message
                     return
                 async for chunk in resp.aiter_bytes():
@@ -124,12 +184,14 @@ async def _stream_response(
         except Exception as exc:
             status = "error"
             error_message = str(exc)[:500]
-            my_logger.exception("Stream proxy failed: model=%s", model)
+            my_logger.exception("Stream proxy failed: model=%s", decision.model)
             raise
         finally:
             latency_ms = int((time.perf_counter() - started) * 1000)
-            _log_usage(db, api_key, model, prompt_tokens, completion_tokens, latency_ms, status, error_message)
-            my_logger.info("Stream finished: model=%s latency=%sms status=%s", model, latency_ms, status)
+            _log_usage(
+                db, api_key, decision.model, prompt_tokens, completion_tokens,
+                latency_ms, status, error_message, decision.reason,
+            )
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -143,16 +205,21 @@ def _log_usage(
     latency_ms: int,
     status: str,
     error_message: str | None,
+    route_reason: str = "",
 ) -> None:
+    msg = error_message or ""
+    if route_reason and status == "success":
+        msg = route_reason
     db.add(
         UsageLog(
             api_key_id=api_key.id,
+            tenant_id=api_key.tenant_id,
             model=model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             status=status,
-            error_message=error_message,
+            error_message=msg[:500] if msg else None,
         )
     )
     db.commit()

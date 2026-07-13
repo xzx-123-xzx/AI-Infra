@@ -37,6 +37,11 @@ onMounted(async () => {
             Embedding: {{ rag.embedding_backend }} · Rerank: {{ rag.rerank_backend }} · Dim:
             {{ rag.embedding_dimension }}
           </p>
+          <p v-if="rag.hybrid_search != null" style="color: var(--muted); font-size: 13px">
+            混合检索: {{ rag.hybrid_search ? '开' : '关' }}
+            <span v-if="rag.elasticsearch != null"> · ES: {{ rag.elasticsearch ? 'ok' : 'down' }}</span>
+            · Langfuse: {{ rag.langfuse ? '开' : '关' }}
+          </p>
         </template>
         <p v-else class="status-fail">未连接</p>
       </div>

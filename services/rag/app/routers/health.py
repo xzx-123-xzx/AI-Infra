@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.database import engine
+from app.services.es_store import ping as es_ping
 from app.services.milvus_store import get_collection
 from common.config import conf
 from common.logger import my_logger
@@ -16,6 +17,12 @@ def health():
         "embedding_backend": "bge" if conf.use_local_embedding else "api",
         "rerank_backend": "bge" if conf.use_local_rerank else "off",
         "embedding_dimension": conf.embedding_dimension,
+        "hybrid_search": conf.HYBRID_SEARCH_ENABLED,
+        "elasticsearch": es_ping() if conf.HYBRID_SEARCH_ENABLED else None,
+        "langfuse": conf.langfuse_enabled,
+        "ingestion_async": conf.INGESTION_ASYNC,
+        "ocr_backend": conf.OCR_BACKEND,
+        "asr_backend": conf.ASR_BACKEND,
     }
 
 

@@ -5,12 +5,16 @@ Set-Location $Root
 Write-Host "==> Building images..."
 docker build -f services/gateway/Dockerfile -t aiinfra/gateway:latest .
 docker build -f services/rag/Dockerfile -t aiinfra/rag:latest .
+docker build -f services/inference/Dockerfile -t aiinfra/inference:latest .
+docker build -f services/agent/Dockerfile -t aiinfra/agent:latest .
 docker build -f web/console/Dockerfile -t aiinfra/console:latest .
 
 if (Get-Command kind -ErrorAction SilentlyContinue) {
     Write-Host "==> Loading images into kind..."
     kind load docker-image aiinfra/gateway:latest
     kind load docker-image aiinfra/rag:latest
+    kind load docker-image aiinfra/inference:latest
+    kind load docker-image aiinfra/agent:latest
     kind load docker-image aiinfra/console:latest
 }
 

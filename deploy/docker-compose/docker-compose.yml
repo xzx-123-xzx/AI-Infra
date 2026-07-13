@@ -84,6 +84,22 @@ services:
       timeout: 10s
       retries: 10
 
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   gateway:
     build:
       context: ../..
@@ -95,6 +111,7 @@ services:
     environment:
       MYSQL_HOST: mysql
       REDIS_HOST: redis
+      INFERENCE_BASE_URL: http://inference:8082/v1
     volumes:
       - ../../logs:/app/logs
     depends_on:
@@ -102,6 +119,38 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      inference:
+        condition: service_started
+
+  inference:
+    build:
+      context: ../..
+      dockerfile: services/inference/Dockerfile
+    ports:
+      - "${INFERENCE_PORT:-8082}:8082"
+    env_file:
+      - ../../.env
+    environment:
+      VLLM_BASE_URL: ${VLLM_BASE_URL:-http://host.docker.internal:8000/v1}
+    volumes:
+      - ../../logs:/app/logs
+
+  agent:
+    build:
+      context: ../..
+      dockerfile: services/agent/Dockerfile
+    ports:
+      - "${AGENT_PORT:-8083}:8083"
+    env_file:
+      - ../../.env
+    environment:
+      RAG_INTERNAL_URL: http://rag:8081
+      MYSQL_HOST: mysql
+    volumes:
+      - ../../logs:/app/logs
+    depends_on:
+      rag:
+        condition: service_started
 
   rag:
     build:
@@ -115,6 +164,10 @@ services:
       MYSQL_HOST: mysql
       MILVUS_HOST: milvus
       MINIO_ENDPOINT: minio:9000
+      ES_HOST: elasticsearch
+      REDIS_HOST: redis
+      HYBRID_SEARCH_ENABLED: ${HYBRID_SEARCH_ENABLED:-true}
+      INGESTION_ASYNC: ${INGESTION_ASYNC:-true}
     volumes:
       - ../../logs:/app/logs
       - ../../data:/app/data
@@ -123,6 +176,30 @@ services:
       mysql:
         condition: service_healthy
       milvus:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  mlops:
+    build:
+      context: ../..
+      dockerfile: services/mlops/Dockerfile
+    ports:
+      - "${MLOPS_PORT:-8084}:8084"
+    env_file:
+      - ../../.env
+    environment:
+      MYSQL_HOST: mysql
+      REDIS_HOST: redis
+    volumes:
+      - ../../logs:/app/logs
+      - ../../data:/app/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   console:
@@ -140,3 +217,4 @@ volumes:
   etcd_data:
   minio_data:
   milvus_data:
+  es_data:

@@ -7,6 +7,7 @@ from app.database import get_db
 from app.models import ApiKey
 from common.config import conf
 from common.logger import my_logger
+from common.model_router import all_available_models
 from common.security import verify_admin_token
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -33,12 +34,19 @@ class CreateKeyResponse(ApiKeyResponse):
 
 @router.get("/models")
 def list_models(_: None = Depends(verify_admin_token)):
-    return {"data": [{"id": model} for model in conf.model_list]}
+    return {"data": all_available_models(), "routing_enabled": conf.ROUTING_ENABLED}
 
 
 @router.get("/keys", response_model=list[ApiKeyResponse])
-def list_keys(db: Session = Depends(get_db), _: None = Depends(verify_admin_token)):
-    return db.query(ApiKey).order_by(ApiKey.id.desc()).all()
+def list_keys(
+    tenant_id: str | None = None,
+    db: Session = Depends(get_db),
+    _: None = Depends(verify_admin_token),
+):
+    query = db.query(ApiKey)
+    if tenant_id:
+        query = query.filter(ApiKey.tenant_id == tenant_id)
+    return query.order_by(ApiKey.id.desc()).all()
 
 
 @router.post("/keys", response_model=CreateKeyResponse)

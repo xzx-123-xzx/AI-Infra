@@ -17,6 +17,14 @@ data:
         metrics_path: /metrics
         static_configs:
           - targets: ["rag:8081"]
+      - job_name: inference
+        metrics_path: /metrics
+        static_configs:
+          - targets: ["inference:8082"]
+      - job_name: agent
+        metrics_path: /metrics
+        static_configs:
+          - targets: ["agent:8083"]
       - job_name: milvus
         metrics_path: /metrics
         static_configs:

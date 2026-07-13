@@ -4,7 +4,9 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import KnowledgeBase
+from app.quota import check_kb_quota
 from app.services.ingestion import remove_kb_files
+from app.services.es_store import delete_by_kb as es_delete_kb
 from app.services.milvus_store import delete_by_kb
 from common.logger import my_logger
 from common.security import verify_admin_token
@@ -34,6 +36,7 @@ def create_kb(
     db: Session = Depends(get_db),
     _: None = Depends(verify_admin_token),
 ):
+    check_kb_quota(db, payload.tenant_id)
     kb = KnowledgeBase(name=payload.name, tenant_id=payload.tenant_id, description=payload.description)
     db.add(kb)
     db.commit()
@@ -78,6 +81,7 @@ def delete_kb(
 
     kb.status = "deleted"
     delete_by_kb(kb_id)
+    es_delete_kb(kb_id)
     remove_kb_files(kb_id)
     db.commit()
     my_logger.info("Knowledge base deleted: id=%s", kb_id)

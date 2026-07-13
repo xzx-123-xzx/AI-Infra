@@ -71,26 +71,31 @@ def insert_chunks(
     doc_id: int,
     chunks: list[str],
     embeddings: list[list[float]],
-) -> int:
+    chunk_ids: list[str] | None = None,
+    chunk_indices: list[int] | None = None,
+) -> tuple[int, list[str]]:
     collection = get_collection()
-    rows = {
-        "chunk_id": [uuid.uuid4().hex for _ in chunks],
-        "kb_id": [kb_id] * len(chunks),
-        "doc_id": [doc_id] * len(chunks),
-        "chunk_index": list(range(len(chunks))),
-        "content": chunks,
-        "embedding": embeddings,
-    }
+    ids = chunk_ids or [uuid.uuid4().hex for _ in chunks]
+    indices = chunk_indices if chunk_indices is not None else list(range(len(chunks)))
     collection.insert([
-        rows["chunk_id"],
-        rows["kb_id"],
-        rows["doc_id"],
-        rows["chunk_index"],
-        rows["content"],
-        rows["embedding"],
+        ids,
+        [kb_id] * len(chunks),
+        [doc_id] * len(chunks),
+        indices,
+        chunks,
+        embeddings,
     ])
     collection.flush()
-    return len(chunks)
+    return len(chunks), ids
+
+
+def delete_chunks_by_ids(chunk_ids: list[str]) -> None:
+    if not chunk_ids:
+        return
+    collection = get_collection()
+    quoted = ", ".join(f'"{cid}"' for cid in chunk_ids)
+    collection.delete(expr=f"chunk_id in [{quoted}]")
+    collection.flush()
 
 
 def search_chunks(kb_id: int, query_vector: list[float], top_k: int) -> list[dict]:

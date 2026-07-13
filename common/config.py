@@ -96,6 +96,31 @@ class Config:
         self.DEFAULT_RATE_LIMIT_RPM = _int("DEFAULT_RATE_LIMIT_RPM", 60)
         self.AVAILABLE_MODELS = _str("AVAILABLE_MODELS")
 
+        # 智能路由（P0）
+        self.ROUTING_ENABLED = _str("ROUTING_ENABLED", "true").lower() == "true"
+        self.ROUTING_TOKEN_THRESHOLD = _int("ROUTING_TOKEN_THRESHOLD", 2000)
+        self.ROUTING_SIMPLE_MODEL = _str("ROUTING_SIMPLE_MODEL") or self.MODEL_NAME
+        self.ROUTING_COMPLEX_MODEL = _str("ROUTING_COMPLEX_MODEL") or "gpt-4o"
+        self.FALLBACK_MODEL = _str("FALLBACK_MODEL") or self.ROUTING_SIMPLE_MODEL
+        _local = _str("LOCAL_MODELS")
+        self.LOCAL_MODELS = [m.strip() for m in _local.split(",") if m.strip()] if _local else []
+
+        # 自托管推理（P0）
+        self.INFERENCE_APP_NAME = _str("INFERENCE_APP_NAME", "AI-Infra Inference")
+        self.INFERENCE_HOST = _str("INFERENCE_HOST", "0.0.0.0")
+        self.INFERENCE_PORT = _int("INFERENCE_PORT", 8082)
+        self.INFERENCE_BASE_URL = _str("INFERENCE_BASE_URL", "http://localhost:8082/v1")
+        self.INFERENCE_API_KEY = _str("INFERENCE_API_KEY", "local")
+        self.VLLM_BASE_URL = _str("VLLM_BASE_URL", "http://localhost:8000/v1")
+        self.VLLM_API_KEY = _str("VLLM_API_KEY", "empty")
+
+        # Agent 服务（P0）
+        self.AGENT_APP_NAME = _str("AGENT_APP_NAME", "AI-Infra Agent")
+        self.AGENT_HOST = _str("AGENT_HOST", "0.0.0.0")
+        self.AGENT_PORT = _int("AGENT_PORT", 8083)
+        self.AGENT_MAX_STEPS = _int("AGENT_MAX_STEPS", 6)
+        self.RAG_INTERNAL_URL = _str("RAG_INTERNAL_URL", "http://localhost:8081")
+
         # RAG 服务
         self.RAG_APP_NAME = _str("RAG_APP_NAME", "AI-Infra RAG")
         self.RAG_HOST = _str("RAG_HOST", "0.0.0.0")
@@ -115,6 +140,53 @@ class Config:
         self.CONSOLE_PORT = _int("CONSOLE_PORT", 3000)
         _cors = _str("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173")
         self.CORS_ORIGINS = [item.strip() for item in _cors.split(",") if item.strip()]
+
+        # 混合检索（P1）
+        self.HYBRID_SEARCH_ENABLED = _str("HYBRID_SEARCH_ENABLED", "false").lower() == "true"
+        self.ES_HOST = _str("ES_HOST", "localhost")
+        self.ES_PORT = _int("ES_PORT", 9200)
+        self.ES_INDEX_PREFIX = _str("ES_INDEX_PREFIX", "aiinfra_chunks")
+        self.RRF_K = _int("RRF_K", 60)
+
+        # Prompt 默认（P1）
+        self.DEFAULT_RAG_SYSTEM_PROMPT = _str(
+            "DEFAULT_RAG_SYSTEM_PROMPT",
+            "你是企业知识库问答助手。请仅根据提供的上下文回答问题。\n"
+            "如果上下文不足以回答，请明确说明不知道，不要编造。\n"
+            "回答时引用相关事实，保持简洁准确。",
+        )
+
+        # Langfuse Trace（P1）
+        self.LANGFUSE_PUBLIC_KEY = _str("LANGFUSE_PUBLIC_KEY")
+        self.LANGFUSE_SECRET_KEY = _str("LANGFUSE_SECRET_KEY")
+        self.LANGFUSE_HOST = _str("LANGFUSE_HOST", "https://cloud.langfuse.com")
+
+        # 异步入库（P2）
+        self.INGESTION_ASYNC = _str("INGESTION_ASYNC", "true").lower() == "true"
+        self.INGESTION_WORKER_ENABLED = _str("INGESTION_WORKER_ENABLED", "true").lower() == "true"
+        self.SYNC_WORKER_INTERVAL = _int("SYNC_WORKER_INTERVAL", 300)
+
+        # 多模态（P2）
+        self.OCR_BACKEND = _str("OCR_BACKEND", "off").lower()  # off | api | tesseract
+        self.ASR_BACKEND = _str("ASR_BACKEND", "api").lower()  # off | api
+        self.OCR_VISION_MODEL = _str("OCR_VISION_MODEL", "gpt-4o-mini")
+        self.ASR_MODEL = _str("ASR_MODEL", "whisper-1")
+
+        # MLOps（P3）
+        self.MLOPS_APP_NAME = _str("MLOPS_APP_NAME", "AI-Infra MLOps")
+        self.MLOPS_HOST = _str("MLOPS_HOST", "0.0.0.0")
+        self.MLOPS_PORT = _int("MLOPS_PORT", 8084)
+        self.MLOPS_DATA_DIR = get_file_path("data/mlops")
+        self.LORA_TRAIN_CMD = _str("LORA_TRAIN_CMD")
+        self.MLOPS_WORKER_ENABLED = _str("MLOPS_WORKER_ENABLED", "true").lower() == "true"
+
+    @property
+    def langfuse_enabled(self) -> bool:
+        return bool(self.LANGFUSE_PUBLIC_KEY and self.LANGFUSE_SECRET_KEY)
+
+    @property
+    def es_url(self) -> str:
+        return f"http://{self.ES_HOST}:{self.ES_PORT}"
 
     def embedding_url(self) -> str:
         base = self.MODEL_BASE_URL.rstrip("/")
@@ -181,6 +253,10 @@ class Config:
     @property
     def retrieval_candidates(self) -> int:
         return max(self.RETRIEVAL_K * self.CANDIDATE_M, self.RETRIEVAL_K)
+
+    @property
+    def local_model_set(self) -> set[str]:
+        return set(self.LOCAL_MODELS)
 
     @property
     def cors_origins(self) -> list[str]:

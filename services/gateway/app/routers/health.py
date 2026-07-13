@@ -1,13 +1,20 @@
 from fastapi import APIRouter
 
+from common.config import conf
 from common.logger import my_logger
+from common.model_router import all_available_models
 
 router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
 def health():
-    return {"status": "ok", "service": "gateway"}
+    return {
+        "status": "ok",
+        "service": "gateway",
+        "routing_enabled": conf.ROUTING_ENABLED,
+        "local_models": conf.LOCAL_MODELS,
+    }
 
 
 @router.get("/ready")

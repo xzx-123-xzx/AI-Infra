@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.routers import admin, chat, health
+from app.routers import admin, chat, health, tenants
 from common.config import conf
 from common.cors import setup_cors
 from common.logger import my_logger
@@ -23,3 +23,4 @@ setup_metrics(app)
 app.include_router(health.router)
 app.include_router(chat.router)
 app.include_router(admin.router)
+app.include_router(tenants.router)

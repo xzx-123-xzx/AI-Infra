@@ -8,6 +8,7 @@ from app.auth import get_api_key
 from app.database import get_db
 from app.models import ApiKey
 from app.proxy import proxy_chat_completions
+from app.quota import check_tenant_quota
 from app.rate_limit import check_rate_limit
 
 router = APIRouter(prefix="/v1", tags=["chat"])
@@ -21,6 +22,7 @@ async def chat_completions(
     db: Session = Depends(get_db),
 ):
     check_rate_limit(api_key.id, api_key.rate_limit_rpm)
+    check_tenant_quota(db, api_key.tenant_id)
     try:
         return await proxy_chat_completions(request, body, api_key, db)
     except httpx.HTTPStatusError as exc:

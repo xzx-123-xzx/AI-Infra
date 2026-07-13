@@ -12,7 +12,9 @@ resources:
   - minio.yaml
   - milvus.yaml
   - gateway.yaml
+  - inference.yaml
   - rag.yaml
+  - agent.yaml
   - console.yaml
   - monitoring/prometheus.yaml
   - monitoring/grafana.yaml
@@ -32,6 +34,12 @@ images:
     newTag: latest
   - name: aiinfra/rag
     newName: aiinfra/rag
+    newTag: latest
+  - name: aiinfra/inference
+    newName: aiinfra/inference
+    newTag: latest
+  - name: aiinfra/agent
+    newName: aiinfra/agent
     newTag: latest
   - name: aiinfra/console
     newName: aiinfra/console

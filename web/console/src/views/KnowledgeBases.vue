@@ -20,7 +20,7 @@ async function load() {
 async function createKb() {
   try {
     await api.createKb(settings, form.value)
-    form.value = { name: '', tenant_id: 'default', description: '' }
+    form.value = { name: '', tenant_id: settings.tenantFilter || 'default', description: '' }
     await load()
   } catch (e) {
     error.value = e.message

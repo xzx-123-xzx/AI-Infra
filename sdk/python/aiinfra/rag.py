@@ -54,19 +54,41 @@ class RagClient:
     def list_documents(self, kb_id: int) -> list[dict]:
         return self._http.get(f"/knowledge-bases/{kb_id}/documents")
 
-    def upload_document(self, kb_id: int, file_path: str | Path) -> dict:
+    def upload_document(self, kb_id: int, file_path: str | Path, *, async_ingest: bool | None = None) -> dict:
         path = Path(file_path)
+        params = {}
+        if async_ingest is not None:
+            params["async_ingest"] = str(async_ingest).lower()
         with path.open("rb") as f:
             files = {"file": (path.name, f)}
             resp = self._http._client.post(
                 f"/knowledge-bases/{kb_id}/documents",
                 files=files,
+                params=params or None,
             )
         if resp.is_error:
             from aiinfra._http import AIInfraError
 
             raise AIInfraError(resp.status_code, resp.text)
         return resp.json()
+
+    def get_document(self, kb_id: int, doc_id: int) -> dict:
+        return self._http.get(f"/knowledge-bases/{kb_id}/documents/{doc_id}")
+
+    def reindex_document(self, kb_id: int, doc_id: int, *, async_ingest: bool = True) -> dict:
+        return self._http.post(
+            f"/knowledge-bases/{kb_id}/documents/{doc_id}/reindex",
+            params={"async_ingest": str(async_ingest).lower()},
+        )
+
+    def create_sync_source(self, kb_id: int, body: dict) -> dict:
+        return self._http.post(f"/knowledge-bases/{kb_id}/sync-sources", json=body)
+
+    def list_sync_sources(self, kb_id: int) -> list[dict]:
+        return self._http.get(f"/knowledge-bases/{kb_id}/sync-sources")
+
+    def run_sync(self, kb_id: int, source_id: int) -> dict:
+        return self._http.post(f"/knowledge-bases/{kb_id}/sync-sources/{source_id}/run")
 
     def delete_document(self, kb_id: int, doc_id: int) -> dict:
         return self._http.delete(f"/knowledge-bases/{kb_id}/documents/{doc_id}")

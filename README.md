@@ -43,7 +43,7 @@
                             │ HTTP / SDK
 ┌───────────────────────────▼─────────────────────────────┐
 │  AI 中台（AI-Infra）← 本项目                              │
-│  模型网关 · RAG ·（规划）Agent · 治理 · 控制台 · 监控      │
+│  模型网关 · RAG · Agent · 推理代理 · 控制台 · 监控         │
 └───────────────────────────┬─────────────────────────────┘
                             │
 ┌───────────────────────────▼─────────────────────────────┐
@@ -88,21 +88,37 @@
 | **部署** | Docker Compose | 本地与开发环境一键启动 |
 | **部署** | Kubernetes | 生产级 manifests + Kustomize |
 | **部署** | Grafana 监控 | K8s 下 Prometheus + Grafana |
+| **模型路由** | 智能选模 | `model=auto` 按上下文长度选大/小模型 |
+| **模型路由** | 本地/API 分流 | `LOCAL_MODELS` 走 Inference → vLLM |
+| **模型路由** | Fallback | 上游 5xx / 超时自动切换备用模型 |
+| **推理** | 自托管推理代理 | `services/inference` 代理 vLLM OpenAI API |
+| **Agent** | 工具调用运行时 | ReAct 循环，`rag_search` / `http_get` |
+| **Agent** | RAG 联动 | Agent 自动调用 RAG 检索知识库 |
+| **Prompt** | 模板 CRUD / 版本 | `POST/GET /prompts`，支持 `{{var}}` 变量 |
+| **Prompt** | A/B 测试 | 多版本权重分流，`POST /prompts/{id}/ab` |
+| **RAG** | 混合检索 | Milvus + Elasticsearch BM25 + RRF |
+| **治理** | 多租户配额 | 月 Token/请求/KB 上限，Gateway 429 拦截 |
+| **治理** | 用量统计 | `GET /admin/tenants/{id}/usage` |
+| **观测** | Langfuse Trace | Gateway 对话 + RAG 检索/LLM 全链路 |
+| **RAG** | 异步入库 | Redis 队列，上传即返回，控制台进度 |
+| **RAG** | 增量更新 | chunk hash diff，仅更新变化块 |
+| **RAG** | 外部同步 | Confluence / 飞书文档定时拉取 |
+| **RAG** | 多模态 | 图片 OCR、音频 ASR 入库 |
+| **SDK** | TypeScript / Java | 与 Python SDK 能力对齐 |
+| **MLOps** | 微调流水线 | 标注 → LoRA → 评估 → 注册表 |
+| **MLOps** | 模型灰度 | Gateway 按 canary_weight 分流 |
+| **Agent** | 工作流编排 | 可视化节点 + start/rag/llm/end |
+| **评测** | AI Eval | 评测集批量跑分、Run 对比 |
+| **RAG** | 联邦检索 | 跨 KB RRF 融合 + 租户隔离 |
 
 ### 规划中功能（🔲）
 
 | 能力域 | 功能 | 优先级建议 |
 |--------|------|------------|
-| **Agent** | 多步推理、工具调用、MCP 协议 | 高 |
-| **推理** | 自托管 vLLM / Ollama 模型服务 | 高 |
-| **模型** | 智能路由（按任务复杂度选大小模型） | 高 |
-| **RAG** | 混合检索（向量 + 关键词 BM25） | 中 |
+| **Agent** | MCP 协议、更多内置工具 | 高 |
 | **RAG** | 父子块 / 语义分块策略 | 中 |
-| **治理** | 多租户配额与计费账单 | 中 |
 | **治理** | 审计日志与操作追溯 | 中 |
-| **观测** | Langfuse / OpenTelemetry 全链路 Trace | 中 |
 | **MLOps** | 微调流水线、模型版本管理 | 低 |
-| **应用** | Prompt 模板管理与 A/B 测试 | 中 |
 | **应用** | 低代码 Agent 编排 UI | 低 |
 
 ---
@@ -118,9 +134,11 @@ flowchart TB
     end
 
     subgraph Services["AI-Infra 服务层"]
-        GW[services/gateway<br/>模型网关]
+        GW[services/gateway<br/>模型网关·智能路由]
         RAG[services/rag<br/>RAG 知识库]
-        AGENT[services/agent<br/>规划中]
+        INF[services/inference<br/>vLLM 代理]
+        AGENT[services/agent<br/>Agent 运行时]
+        VLLM[vLLM / Ollama]
     end
 
     subgraph Common["common/ 共享能力层"]
@@ -148,9 +166,12 @@ flowchart TB
     UI --> GW & RAG
     SDK --> GW & RAG
 
-    GW & RAG --> Common
+    GW & RAG & AGENT --> Common
     GW --> MYSQL & REDIS & LLM_API
+    GW --> INF
+    INF --> VLLM
     RAG --> MYSQL & MILVUS & MINIO & LLM_API
+    AGENT --> RAG
 
     PROM --> GW & RAG
     GRAF --> PROM
@@ -228,62 +249,80 @@ flowchart TB
 
 ---
 
-#### 3. `services/agent` — Agent 运行时（🔲 规划中）
+#### 3. `services/inference` — 自托管推理代理（P0 ✅）
 
-**预期作用：** 支持多步任务自动化——LLM 规划 → 调用工具（HTTP / SQL / 内部 API / MCP）→ 汇总结果。
+**作用：** 对接 **vLLM / Ollama** 等 OpenAI 兼容本地推理引擎，Gateway 将 `LOCAL_MODELS` 中的模型路由到此服务。
 
-**预期能力：**
+| 能力 | 说明 |
+|------|------|
+| 代理对话 | 转发 `/v1/chat/completions` 到 vLLM |
+| 模型列表 | 透传 vLLM `/v1/models` |
+| 健康检查 | `/ready` 探测 vLLM 可用性 |
 
-- 工具注册中心与权限控制
-- 会话状态与记忆持久化
-- 人机协同（HITL）中断与恢复
-- 与 Gateway、RAG 组合：先检索再行动
+**端口：** `8082` · **前置依赖：** vLLM（默认 `http://localhost:8000/v1`）
 
 ---
 
-#### 4. `services/inference` — 自托管推理（🔲 规划中）
+#### 4. `services/agent` — Agent 运行时（P0 ✅）
 
-**预期作用：** 在内网部署开源大模型（Qwen、DeepSeek、Llama），通过 vLLM / TGI 提供推理，数据不出域。
+**作用：** 支持**多步任务自动化**——LLM 规划 → 调用工具 → 汇总结果，可与 RAG 知识库联动。
 
-**预期能力：**
+| 工具 | 说明 |
+|------|------|
+| `rag_search` | 调用 RAG 服务检索知识库片段 |
+| `http_get` | 发起 HTTP GET 获取外部信息 |
 
-- GPU 资源调度与副本扩缩
-- 与 Gateway 集成，作为上游 Provider
-- 模型版本管理与灰度发布
+| API | 说明 |
+|-----|------|
+| `POST /agents/run` | 执行 Agent 任务，返回 answer + steps |
+| `GET /agents/tools` | 列出可用工具 |
+
+**端口：** `8083`
+
+---
+
+#### 5. `common/model_router.py` — 智能路由（P0 ✅）
+
+**作用：** Gateway 核心路由逻辑。
+
+| 能力 | 说明 |
+|------|------|
+| `model=auto` | 按消息 token 估算，超阈值用复杂模型，否则简单模型 |
+| 本地分流 | `LOCAL_MODELS` 列表内模型 → Inference → vLLM |
+| Fallback | 主模型 5xx / 超时 → `FALLBACK_MODEL` |
 
 ---
 
 ### 二、共享能力层 `common/`
 
-所有 Python 服务共用，**禁止反向依赖** `services/` 下的业务代码。
-
 | 模块 | 文件 | 作用 |
 |------|------|------|
-| **配置中心** | `config.py` | 读取根目录 `.env`，提供 `conf` 单例；MySQL/Redis URL、Embedding 后端判断等 |
-| **日志** | `logger.py` | 统一 `my_logger`，输出到控制台 + `logs/app.log` |
-| **路径** | `path_utils.py` | `get_file_path()` 基于项目根目录解析路径 |
-| **LLM 客户端** | `llm.py` | LangChain `ChatOpenAI`，RAG 问答使用 |
-| **Admin 鉴权** | `security.py` | 校验 Admin Token，Gateway Admin 与 RAG 共用 |
-| **BGE Embedding** | `bge_embedding.py` | 加载 BGE-M3，输出 1024 维 dense 向量 |
-| **BGE Rerank** | `bge_reranker.py` | 加载 bge-reranker-base，query-passage 精排 |
-| **Prometheus** | `metrics.py` | FastAPI `/metrics` 自动埋点 |
-| **CORS** | `cors.py` | 控制台跨域配置 |
-
-**设计原则：** 配置、日志、模型客户端、鉴权逻辑**只写一次**，各服务复用。
+| 配置中心 | `config.py` | 读取 `.env`，路由/推理/Agent 配置 |
+| 模型路由 | `model_router.py` | 智能选模、本地分流、Fallback |
+| Prompt | `prompt_utils.py` | `{{var}}` 变量提取与渲染 |
+| 混合检索 | `hybrid_search.py` | RRF 多路召回融合 |
+| Trace | `tracing.py` | Langfuse 封装（可选启用） |
+| 日志 | `logger.py` | `logs/app.log` |
+| LLM | `llm.py` | LangChain ChatOpenAI |
+| 鉴权 | `security.py` | Admin Token |
+| BGE | `bge_embedding.py` / `bge_reranker.py` | 本地 Embedding / Rerank |
+| 指标 | `metrics.py` | Prometheus `/metrics` |
 
 ---
 
 ### 三、接入层
 
-#### 5. `web/console` — Web 管理控制台（Phase 4）
+#### 6. `web/console` — Web 管理控制台（Phase 4）
 
 **作用：** 为运维与算法同学提供**可视化管控面**，无需手写 curl 即可完成日常管理。
 
 | 页面 | 功能 |
 |------|------|
-| 概览 | Gateway / RAG 健康状态、Embedding 后端、可用模型 |
-| API Keys | 创建与查看 Gateway API Key |
-| 知识库 | 创建/删除知识库、上传文档、在线 RAG 问答测试 |
+| 概览 | Gateway / RAG 健康、混合检索、Langfuse 状态 |
+| API Keys | 创建与查看 Key（支持租户过滤） |
+| 知识库 | 创建/删除、上传文档、RAG 问答 |
+| Prompt | 模板 CRUD、版本、A/B 配置 |
+| 租户 | 配额设置、用量统计 |
 
 **技术栈：** Vue 3 + Vite · Docker 下 Nginx 反向代理 `/api/gateway`、`/api/rag`
 
@@ -299,18 +338,17 @@ flowchart TB
 |--------|----------|
 | `GatewayClient` | `create_api_key`、`chat_completions`、`list_models` |
 | `RagClient` | `create_knowledge_base`、`upload_document`、`retrieve`、`chat` |
-
-**适用：** 后端服务集成、脚本自动化、Notebook 实验。
+| `AgentClient` | `run`、`list_tools` |
 
 ---
 
 ### 四、部署与运维层
 
-#### 7. `deploy/docker-compose` — 本地 / 开发部署
+#### 8. `deploy/docker-compose` — 本地 / 开发部署
 
 **作用：** 一条命令启动完整栈，适合开发、演示、POC。
 
-**包含服务：** MySQL、Redis、etcd、MinIO、Milvus、Gateway、RAG、Console
+**包含服务：** MySQL、Redis、Milvus 栈、Elasticsearch、Gateway、Inference、RAG、Agent、Console
 
 **启动：** `.\scripts\start.ps1` 或 `./scripts/start.sh`
 
@@ -339,6 +377,7 @@ flowchart TB
 |------|------|
 | `start.ps1` / `start.sh` | Docker Compose 一键启动 |
 | `run_gateway.py` / `run_rag.py` | 本地开发启动服务 |
+| `run_inference.py` / `run_agent.py` | 本地启动推理代理 / Agent |
 | `run_console.ps1` | 本地启动前端 |
 | `download_bge_models.py` | 从 HuggingFace 下载 BGE 模型 |
 | `k8s_deploy.ps1` | K8s 构建 + 部署 |
@@ -369,10 +408,12 @@ AI-Infra/
 ├── services/
 │   ├── gateway/                # 模型网关 ✅
 │   ├── rag/                    # RAG 知识库 ✅
-│   ├── agent/                  # Agent 运行时 🔲
-│   └── inference/              # 自托管推理 🔲
+│   ├── agent/                  # Agent 运行时 ✅
+│   └── inference/              # 自托管推理 ✅
 ├── web/console/                # 管理控制台 ✅
 ├── sdk/python/                 # Python SDK ✅
+├── sdk/typescript/             # TypeScript SDK ✅
+├── sdk/java/                   # Java SDK ✅
 ├── deploy/
 │   ├── docker-compose/         # 本地部署 ✅
 │   └── k8s/                    # K8s + 监控 ✅
@@ -414,7 +455,10 @@ AI-Infra/
 | Phase 3 | 本地 BGE Embedding + Rerank | ✅ |
 | Phase 4 | Web 控制台 + Python SDK | ✅ |
 | Phase 5 | K8s 部署 + Prometheus/Grafana | ✅ |
-| Phase 6+ | Agent、自托管推理、治理增强 | 🔲 |
+| Phase 6 | 智能路由 + 自托管推理 + Agent | ✅ |
+| Phase 7 | Prompt + 混合检索 + 租户治理 + Trace | ✅ |
+| Phase 8 | 异步 ingestion + 增量更新 + 多模态 + TS/Java SDK | ✅ |
+| Phase 9 | MLOps + Agent 编排 + 评测 + 联邦检索 | ✅ |
 
 ---
 
@@ -424,7 +468,7 @@ AI-Infra/
 
 | 优化项 | 说明 | 预期收益 |
 |--------|------|----------|
-| **模型智能路由** | 简单任务路由小模型，复杂任务路由大模型 | 降低 30–60% Token 成本 |
+| **模型智能路由** | 简单任务路由小模型，复杂任务路由大模型 | ✅ Phase 6 已实现 `model=auto` |
 | **响应缓存** | 相同 Prompt + 参数缓存 LLM 响应 | 降延迟、降成本 |
 | **Embedding 批处理与缓存** | 文档 embedding 批量写入，Query 缓存 | 提升 ingestion 与检索吞吐 |
 | **Gateway 异步化** | 长任务走消息队列，避免阻塞 HTTP | 提升并发稳定性 |
@@ -479,78 +523,39 @@ AI-Infra/
 
 按推荐优先级排列，可在现有架构上增量演进：
 
-### P0 — 高优先级（建议下一步）
+### P0 — 高优先级（✅ 已完成）
 
 ```
-1. Agent 运行时（services/agent）
-   - 工具注册（HTTP、SQL、内部 API）
-   - MCP 协议支持
-   - 与 RAG 组合：先检索知识再调用工具
-
-2. 自托管推理（services/inference）
-   - vLLM 部署 Qwen / DeepSeek
-   - Gateway 增加本地模型路由
-
-3. 模型智能路由
-   - 按 token 长度 / 任务类型选择模型
-   - Fallback：主模型失败自动切换备用
+1. Agent 运行时（services/agent）        ✅ rag_search / http_get 工具
+2. 自托管推理（services/inference）      ✅ vLLM OpenAI 兼容代理
+3. 模型智能路由（common/model_router）   ✅ auto 选模 / 本地分流 / Fallback
 ```
 
-### P1 — 中优先级
+### P1 — 中优先级（✅ 已完成）
 
 ```
-4. Prompt 管理
-   - 模板 CRUD、版本、变量替换
-   - A/B 测试不同 Prompt 效果
-
-5. 混合检索 RAG
-   - Milvus 向量 + Elasticsearch BM25
-   - Reciprocal Rank Fusion 融合
-
-6. 多租户治理
-   - 租户配额、用量统计、简单账单
-   - 控制台按租户隔离视图
-
-7. 全链路 Trace
-   - 接入 Langfuse
-   - 单次 RAG 请求：检索片段 + LLM 输入输出可追溯
+4. Prompt 管理                          ✅ 模板 CRUD / 版本 / {{变量}} / A/B 权重分流
+5. 混合检索 RAG                         ✅ Milvus 向量 + ES BM25 + RRF 融合
+6. 多租户治理                           ✅ 配额 / 用量统计 / 控制台租户视图
+7. 全链路 Trace                         ✅ Langfuse（Gateway + RAG 检索与 LLM）
 ```
 
-### P2 — 增强体验
+### P2 — 增强体验（✅ 已完成）
 
 ```
-8. 异步文档处理
-   - 上传后立即返回，后台 Celery / Redis Queue ingestion
-   - 控制台展示处理进度
-
-9. 知识库增量更新
-   - 文档 diff 检测，仅更新变化 chunk
-   - 定时同步外部数据源（Confluence、飞书文档）
-
-10. 多模态支持
-    - 图片 OCR 入库
-    - ASR 音频转写入库
-
-11. TypeScript / Java SDK
-    - 与 Python SDK 对齐
+8. 异步文档处理                        ✅ Redis 队列 + Worker + 进度条
+9. 知识库增量更新                      ✅ chunk diff + Confluence/飞书同步
+10. 多模态支持                         ✅ 图片 OCR + 音频 ASR（API/tesseract）
+11. TypeScript / Java SDK              ✅ 与 Python SDK 对齐
 ```
 
-### P3 — 长期能力
+### P3 — 长期能力（✅ 已完成）
 
 ```
-12. MLOps 微调流水线
-    - 标注 → LoRA 微调 → 评估 → 发布
-    - 模型注册表与灰度
-
-13. 低代码 Agent 编排 UI
-    - 可视化拖拽工作流（类似 Dify）
-
-14. AI 评测平台
-    - 批量跑评测集、对比不同 RAG 策略 / 模型
-
-15. 联邦检索
-    - 跨多个知识库联合问答
-    - 统一权限控制
+12. MLOps 微调流水线              ✅ 标注 → LoRA 训练 → 评估 → 注册表灰度发布
+13. 低代码 Agent 编排 UI          ✅ 可视化节点工作流 + 执行引擎
+14. AI 评测平台                   ✅ 评测集批量跑分 + Run 对比
+15. 联邦检索                      ✅ 跨 KB 联合检索/问答 + 租户权限校验
 ```
 
 ---
@@ -569,8 +574,11 @@ AI-Infra/
 
 | 服务 | 端口 | 说明 |
 |------|------|------|
-| Gateway | 8080 | 模型 API |
+| Gateway | 8080 | 模型 API + 智能路由 |
 | RAG | 8081 | 知识库 API |
+| Inference | 8082 | vLLM 代理 |
+| Agent | 8083 | Agent 运行时 + 工作流 |
+| MLOps | 8084 | 微调流水线 + 模型注册表 |
 | Console | 3000 | Web 管理台 |
 | MySQL | 3306 | 元数据库 |
 | Redis | 6379 | 限流 |

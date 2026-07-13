@@ -1,6 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import { loadSettings, saveSettings } from './api'
+import { loadSettings, saveSettings } from '../api'
 
 const open = ref(false)
 const settings = ref(loadSettings())
@@ -26,6 +26,7 @@ function submit() {
     </div>
     <p v-if="!open" class="mono" style="color: var(--muted); margin: 12px 0 0">
       Gateway: {{ settings.gatewayBase }} · RAG: {{ settings.ragBase }}
+      <span v-if="settings.tenantFilter"> · 租户: {{ settings.tenantFilter }}</span>
     </p>
     <form v-if="open" @submit.prevent="submit" style="margin-top: 16px">
       <div class="grid">
@@ -40,6 +41,10 @@ function submit() {
         <div>
           <label>RAG Base URL</label>
           <input v-model="settings.ragBase" placeholder="/api/rag" />
+        </div>
+        <div>
+          <label>租户过滤（留空=全部）</label>
+          <input v-model="settings.tenantFilter" placeholder="default" />
         </div>
       </div>
       <div style="margin-top: 12px">
