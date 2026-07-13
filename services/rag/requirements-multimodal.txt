@@ -1,0 +1,4 @@
+# 可选：本地 OCR（OCR_BACKEND=tesseract）
+# pip install -r services/rag/requirements-multimodal.txt
+pytesseract>=0.3.10
+Pillow>=10.0.0
